@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 
 from django.db.models.signals import post_delete, post_save, pre_delete
 
@@ -23,9 +24,10 @@ def many_to_many_field_definition_post_save(sender, instance, created, **kwargs)
         #TODO: track field and model rename in order to rename the intermediaray
         # table...
         pass
-    
+
 #post_save.connect(many_to_many_field_definition_post_save, ManyToManyFieldDefinition,
 #                  dispatch_uid='mutant.contrib.related.management.many_to_many_field_definition_post_save')
+
 
 def many_to_many_field_definition_pre_delete(sender, instance, **kwargs):
     model_class = instance.model_def.model_class()
@@ -38,6 +40,7 @@ def many_to_many_field_definition_pre_delete(sender, instance, **kwargs):
 
 pre_delete.connect(many_to_many_field_definition_pre_delete, ManyToManyFieldDefinition,
                    dispatch_uid='mutant.contrib.related.management.many_to_many_field_definition_pre_delete')
+
 
 def many_to_many_field_definition_post_delete(sender, instance, **kwargs):
     syncdbs, intermediary_table_name = instance._state._m2m_deletion

@@ -1,44 +1,51 @@
+from __future__ import unicode_literals
+
+from inspect import isclass
 
 from django.contrib.contenttypes.models import ContentType
-from django.db.models.signals import class_prepared
+from django.core.exceptions import ValidationError
+from django.core.validators import EMPTY_VALUES
 from django.forms.fields import ChoiceField
-from django.forms.models import ModelChoiceField
-from django.utils.text import capfirst
+from django.utils.encoding import smart_unicode
+from polymodels.utils import get_content_types
 
-from .common import choices_from_dict
-from .hacks import get_real_content_type
-from .models.field import FieldDefinitionBase
+from .models.field import FieldDefinition, FieldDefinitionBase
+from .utils import group_item_getter, choices_from_dict
 
 
-class FieldDefinitionTypeField(ModelChoiceField):
+class FieldDefinitionTypeField(ChoiceField):
+    def __init__(self, field_definitions=None, empty_label="---------",
+                 group_by_category=True, *args, **kwargs):
+        if field_definitions is None:
+            field_definitions = FieldDefinitionBase._field_definitions.values()
+        else:
+            for fd in field_definitions:
+                if not isinstance(fd, FieldDefinitionBase):
+                    raise TypeError("%r is not a subclass of FieldDefinitionBase" % fd)
+        fds_choices = []
+        for fd, ct in get_content_types(field_definitions).iteritems():
+            group = unicode(fd.get_field_category()) if group_by_category else None
+            fds_choices.append({
+                'value': ct.pk,
+                'label': unicode(fd.get_field_description()),
+                'group': group,
+            })
+        choices = [('', empty_label)] + list(choices_from_dict(sorted(fds_choices, key=group_item_getter)))
+        super(FieldDefinitionTypeField, self).__init__(choices, *args, **kwargs)
 
-    def __init__(self, *args, **kwargs):
-        super(FieldDefinitionTypeField, self).__init__(ContentType.objects.all(),
-                                                       *args, **kwargs)
+    def to_python(self, value):
+        if value in EMPTY_VALUES:
+            return None
+        try:
+            ct = ContentType.objects.get_for_id(value)
+        except ContentType.DoesNotExist:
+            raise ValidationError(self.error_messages['invalid_choice'])
+        return ct
 
-    def _get_choices(self):
-        if not hasattr(self.__class__, '_choices'):
-            choices = []
-            for field_definition in FieldDefinitionBase._field_definitions.values():
-                try:
-                    ct = get_real_content_type(field_definition)
-                except ContentType.DoesNotExist:
-                    # Ignore stale ContentTypes
-                    continue
-                choices.append({
-                    'value': ct.pk,
-                    'label': capfirst(field_definition.get_field_description()),
-                    'group': capfirst(field_definition.get_field_category()),
-                })
-            setattr(self.__class__, '_choices',
-                    ((u"", self.empty_label),) + tuple(choices_from_dict(choices)))
-        return self._choices
-
-    choices = property(_get_choices, ChoiceField._set_choices)
-
-def _clear_cached_choices(sender, **kwargs):
-    if (isinstance(sender, FieldDefinitionBase) and
-        hasattr(FieldDefinitionTypeField, '_choices')):
-        delattr(FieldDefinitionTypeField, '_choices')
-
-class_prepared.connect(_clear_cached_choices)
+    def valid_value(self, value):
+        if isclass(value) and issubclass(value, FieldDefinition):
+            value = value.get_content_type()
+        if isinstance(value, ContentType):
+            value = value.pk
+        value = smart_unicode(value)
+        return super(FieldDefinitionTypeField, self).valid_value(value)

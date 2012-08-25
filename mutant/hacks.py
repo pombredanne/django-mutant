@@ -1,3 +1,5 @@
+from __future__ import unicode_literals
+
 
 def patch_postgis_bad_geomery_escape():
     """
@@ -29,6 +31,7 @@ def patch_postgis_bad_geomery_escape():
                 return 'ST_GeomFromEWKB(%s)' % self._adapter.getquoted()
             PostGISAdapter.getquoted = _PostGISAdapter_getquoted
 
+
 def patch_db_field_compare():
     """
     Field instances cannot be compared to other objects because of attribute
@@ -50,31 +53,21 @@ def patch_db_field_compare():
         Field.__lt__ = _Field__lt__
         assert Field() != None
 
-def get_concrete_model(model):
-    """
-    Prior to django r17573 (django 1.4), `proxy_for_model` returned the
-    actual concrete model of a proxy and there was no `concrete_model`
-    property so we try to fetch the `concrete_model` from the opts
-    and fallback to `proxy_for_model` if it's not defined.
-    """
-    # TODO: Remove when support for django 1.4 is dropped
-    return getattr(model._meta, 'concrete_model', model._meta.proxy_for_model)
 
-def get_real_content_type(model, db=None):
+def patch_model_option_verbose_name_raw():
     """
-    Prior to #18399 being fixed there was no way to retrieve `ContentType`
-    of proxy models. This is a shim that tries to use the newly introduced
-    flag and fallback to another method.
+    Until #17763 and all the permission name length issues are fixed we patch
+    the `verbose_name_raw` method to return a truncated string in order to
+    avoid DatabaseError.
     """
-    # TODO: Remove when support for django 1.4 is dropped
-    from django.contrib.contenttypes.models import ContentType
-    cts = ContentType.objects
-    if db:
-        cts = cts.db_manager(db)
-    try:
-        return cts.get_for_model(model, for_concrete_model=False)
-    except TypeError:
-        opts = model._meta
-        app_label = opts.app_label
-        object_name = opts.object_name.lower()
-        return cts.get_by_natural_key(app_label, object_name)
+    from django.db.models.options import Options
+    verbose_name_raw = Options.verbose_name_raw.fget
+    if hasattr(verbose_name_raw, '_patched'):
+        return
+    def _get_verbose_name_raw(self):
+        name = verbose_name_raw(self)
+        if len(name) >= 40:
+            name = "%s..." % name[0:36]
+        return name
+    _get_verbose_name_raw.patched = True
+    Options.verbose_name_raw = property(_get_verbose_name_raw)

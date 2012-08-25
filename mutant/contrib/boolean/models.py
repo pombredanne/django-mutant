@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 
 from django.db.models import fields
 from django.utils.translation import ugettext_lazy as _
@@ -5,22 +6,18 @@ from django.utils.translation import ugettext_lazy as _
 from ...models import FieldDefinition
 
 
+class _BooleanMeta:
+    defined_field_category = _('Boolean')
+
+
 class BooleanFieldDefinition(FieldDefinition):
-    
-    class Meta:
+    class Meta(_BooleanMeta):
         app_label = 'mutant'
         proxy = True
-        verbose_name = _(u'boolean field')
-        verbose_name_plural = _(u'boolean fields')
         defined_field_class = fields.BooleanField
-        defined_field_category = _(u'boolean')
 
 class NullBooleanFieldDefinition(FieldDefinition):
-    
-    class Meta:
+    class Meta(_BooleanMeta):
         app_label = 'mutant'
         proxy = True
-        verbose_name = _(u'null boolean field')
-        verbose_name_plural = _(u'null boolean fields')
         defined_field_class = fields.NullBooleanField
-        defined_field_category = _(u'boolean')
