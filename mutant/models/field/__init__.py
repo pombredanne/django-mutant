@@ -2,27 +2,28 @@ from __future__ import unicode_literals
 
 import warnings
 
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.db import models
 from django.db.models import signals
+from django.utils import six
 from django.utils.translation import ugettext_lazy as _
-from orderable.models import OrderableModel
-from picklefield.fields import dbsafe_encode, PickledObjectField
+from picklefield.fields import PickledObjectField
 from polymodels.models import BasePolymorphicModel
-from polymodels.utils import copy_fields, get_content_type
+from polymodels.utils import copy_fields
 
-from .managers import FieldDefinitionManager, FieldDefinitionChoiceManager
+from ...db.fields import (
+    FieldDefinitionTypeField, LazilyTranslatedField, PythonIdentifierField,
+)
+from ...utils import lazy_string_format, popattr
 from ..model import ModelDefinitionAttribute
-from ...db.fields import (FieldDefinitionTypeField, LazilyTranslatedField,
-    PythonIdentifierField)
-from ...hacks import patch_model_option_verbose_name_raw
-from ...utils import get_concrete_model, lazy_string_format, popattr
+from ..ordered import OrderedModel
+from .managers import FieldDefinitionChoiceManager, FieldDefinitionManager
 
 
-patch_model_option_verbose_name_raw()
+def NOT_PROVIDED():
+    return models.NOT_PROVIDED
 
-
-NOT_PROVIDED = dbsafe_encode(models.NOT_PROVIDED)
 
 class FieldDefinitionBase(models.base.ModelBase):
     FIELD_CLASS_ATTR = 'defined_field_class'
@@ -39,6 +40,8 @@ class FieldDefinitionBase(models.base.ModelBase):
     _lookups = {}
 
     def __new__(cls, name, parents, attrs):
+        super_new = super(FieldDefinitionBase, cls).__new__
+
         if 'Meta' in attrs:
             Meta = attrs['Meta']
 
@@ -71,13 +74,12 @@ class FieldDefinitionBase(models.base.ModelBase):
             has_verbose_name = False
             has_verbose_name_plural = False
 
-        definition = super(FieldDefinitionBase, cls).__new__(cls, name, parents, attrs)
+        definition = super_new(cls, name, parents, attrs)
 
         # Store the FieldDefinition cls
         if cls._base_definition is None:
             cls._base_definition = definition
         else:
-            opts = definition._meta
             base_definition = cls._base_definition
             parents = [definition]
             while parents:
@@ -94,12 +96,12 @@ class FieldDefinitionBase(models.base.ModelBase):
                     if field_category is None:
                         field_category = getattr(parent_opts, cls.FIELD_CATEGORY_ATTR, None)
                     if parent is not base_definition:
-                        parents = list(parent.__bases__) + parents # mimic mro
+                        parents = list(parent.__bases__) + parents  # mimic mro
 
-            from ...management import (field_definition_post_save,
-                FIELD_DEFINITION_POST_SAVE_UID)
-            object_name = definition._meta.object_name.lower()
-            post_save_dispatch_uid = FIELD_DEFINITION_POST_SAVE_UID % object_name
+            from ...management import (
+                field_definition_post_save, FIELD_DEFINITION_POST_SAVE_UID
+            )
+            post_save_dispatch_uid = FIELD_DEFINITION_POST_SAVE_UID % definition._meta.model_name
             signals.post_save.connect(field_definition_post_save, definition,
                                       dispatch_uid=post_save_dispatch_uid)
 
@@ -107,22 +109,6 @@ class FieldDefinitionBase(models.base.ModelBase):
             # overriding the delete methods since it might not be called
             # when deleting the associated model definition.
             if definition.delete != base_definition.delete:
-                concrete_model = get_concrete_model(definition)
-                if (opts.proxy and
-                    concrete_model.delete != base_definition.delete):
-                    # Because of the workaround for django #18083 in
-                    # FieldDefinition, overriding the `delete` method on a proxy
-                    # of a concrete FieldDefinition that also override the
-                    # delete method might call some deletion code twice.
-                    # Until #18083 is fixed and the workaround is removed we
-                    # raise a `TypeError` to prevent this from happening.
-                    msg = ("Proxy model deletion is partially broken until "
-                           "django #18083 is fixed. To work around this issue, "
-                           "mutant make sure to call the concrete `FieldDefinition`"
-                           "you are proxying, in this case `%(concrete_cls)s`. "
-                           "However, this can trigger a double execution of "
-                           "`%(concrete_cls)s.delete`, thus it is prohibited.")
-                    raise TypeError(msg % {'concrete_cls': concrete_model.__name__})
                 def_name = definition.__name__
                 warnings.warn("Avoid overriding the `delete` method on "
                               "`FieldDefinition` subclass `%s` since it won't "
@@ -150,12 +136,9 @@ class FieldDefinitionBase(models.base.ModelBase):
         return definition
 
 
-class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
-    __metaclass__ = FieldDefinitionBase
-
-    FIELD_DEFINITION_PK_ATTR = '_mutant_field_definition_pk'
-
-    content_type_field_name = 'content_type'
+class FieldDefinition(six.with_metaclass(FieldDefinitionBase, BasePolymorphicModel,
+                                         ModelDefinitionAttribute)):
+    CONTENT_TYPE_FIELD = 'content_type'
     content_type = FieldDefinitionTypeField()
 
     name = PythonIdentifierField(_('name'))
@@ -185,10 +168,17 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
         verbose_name = _('field')
         verbose_name_plural = _('fields')
         unique_together = (('model_def', 'name'),)
-        defined_field_options = ('name', 'verbose_name', 'help_text',
-                                 'null', 'blank', 'db_column', 'db_index',
-                                 'editable', 'default', 'primary_key', 'unique',
-                                 'unique_for_date', 'unique_for_month', 'unique_for_year')
+        defined_field_options = (
+            'name', 'verbose_name', 'help_text',
+            'null', 'blank', 'db_column', 'db_index',
+            'editable', 'default', 'primary_key', 'unique',
+            'unique_for_date', 'unique_for_month', 'unique_for_year'
+        )
+
+    def __init__(self, *args, **kwargs):
+        super(FieldDefinition, self).__init__(*args, **kwargs)
+        if self.pk:
+            self._saved_name = self.name
 
     def natural_key(self):
         return self.model_def.natural_key() + (self.name,)
@@ -197,10 +187,13 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
     def save(self, *args, **kwargs):
         if self.pk:
             self._state._pre_save_field = self.get_bound_field()
-        return super(FieldDefinition, self).save(*args, **kwargs)
+        saved = super(FieldDefinition, self).save(*args, **kwargs)
+        self._saved_name = self.name
+        return saved
 
     def delete(self, *args, **kwargs):
-        if self._meta.proxy:
+        opts = self._meta
+        if opts.proxy:
             # TODO: #18083
             # Ok so this is a big issue: proxy model deletion is completely
             # broken. When you delete a inherited model proxy only the proxied
@@ -208,7 +201,7 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
             # proxied model and it's subclasses. Here we attempt to fix this by
             # getting the concrete model instance of the proxy and deleting it
             # while sending proxy model signals.
-            concrete_model = get_concrete_model(self)
+            concrete_model = opts.concrete_model
             concrete_model_instance = copy_fields(self, concrete_model)
 
             # Send proxy pre_delete
@@ -226,15 +219,19 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
         return super(FieldDefinition, self).delete(*args, **kwargs)
 
     def clone(self):
-        options = dict((name, getattr(self, name))
-                       for name in self.get_field_option_names())
+        options = dict(
+            (name, getattr(self, name))
+            for name in self.get_field_option_names()
+        )
         return self.__class__(**options)
 
     @classmethod
     def get_field_class(cls):
         field_class = getattr(cls._meta, FieldDefinitionBase.FIELD_CLASS_ATTR)
         if not field_class:
-            raise NotImplementedError
+            raise NotImplementedError(
+                "%s didn't define any `field_class`." % cls.__name__
+            )
         return field_class
 
     @classmethod
@@ -251,53 +248,51 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
 
     @classmethod
     def get_content_type(cls):
-        return get_content_type(cls)
-
-    def get_field_choices(self):
-        return tuple(self.choices.as_choices())
+        return ContentType.objects.get_for_model(cls, for_concrete_model=False)
 
     def get_field_options(self, **overrides):
         model_opts = self._meta
         options = {}
         for name in self.get_field_option_names():
-            if name in overrides: # Avoid fetching if it's overridden
+            if name in overrides:  # Avoid fetching if it's overridden
                 continue
             value = getattr(self, name)
-            if value != model_opts.get_field(name).get_default():
+            field = model_opts.get_field(name)
+            default = field.to_python(field.get_default())
+            if value != default:
                 options[name] = value
-        if 'choices' not in overrides: # Avoid fetching if it's overridden
-            choices = self.get_field_choices()
+        if 'choices' not in overrides:  # Avoid fetching if it's overridden
+            choices = self.choices.construct()
             if choices:
                 options['choices'] = choices
         return options
 
-    def field_instance(self, **overrides):
+    def construct(self, **overrides):
         cls = self.get_field_class()
         options = self.get_field_options(**overrides)
         options.update(overrides)
         instance = cls(**options)
-        setattr(instance, self.FIELD_DEFINITION_PK_ATTR, self.pk)
+        instance.set_attributes_from_name(self.name)
         return instance
 
     def get_bound_field(self):
         opts = self.model_def.model_class()._meta
         for field in opts.fields:
-            if getattr(field, self.FIELD_DEFINITION_PK_ATTR, None) == self.pk:
+            if field.name == self._saved_name:
                 return field
 
-    def _south_ready_field_instance(self):
+    def construct_for_migrate(self):
         """
-        South api sometimes needs to have modified version of fields to work.
-        i. e. You can't pass a ForeignKey(to='self') to add_column
+        Provide a suitable field to be used in migrations.
         """
-        return self.field_instance()
+        return self.construct()
 
     def clean(self):
         # Make sure we can build the field
         try:
-            field = self.field_instance()
+            field = self.construct()
         except NotImplementedError:
-            pass # `get_field_class` is not implemented
+            pass  # `get_field_class` is not implemented
         except Exception as e:
             raise ValidationError(e)
         else:
@@ -311,29 +306,32 @@ class FieldDefinition(BasePolymorphicModel, ModelDefinitionAttribute):
                     raise ValidationError({'default': [msg]})
 
 
-class FieldDefinitionChoice(OrderableModel):
+class FieldDefinitionChoice(OrderedModel):
     """
     A Model to allow specifying choices for a field definition instance
     """
-    field_def = models.ForeignKey(FieldDefinition, related_name='choices')
+    field_def = models.ForeignKey(FieldDefinition, on_delete=models.CASCADE, related_name='choices')
     group = LazilyTranslatedField(_('group'), blank=True, null=True)
     value = PickledObjectField(_('value'), editable=True)
     label = LazilyTranslatedField(_('label'))
 
     objects = FieldDefinitionChoiceManager()
 
-    class Meta(OrderableModel.Meta):
+    class Meta:
         app_label = 'mutant'
         verbose_name = _('field definition choice')
         verbose_name_plural = _('field definition choices')
-        unique_together = (('field_def', 'order'),
-                           ('field_def', 'group', 'value'))
+        ordering = ['order']
+        unique_together = (
+            ('field_def', 'order'),
+            ('field_def', 'group', 'value')
+        )
 
     def clean(self):
         try:
             # Make sure to create a field instance with no choices to avoid
             # validating against existing ones.
-            field = self.field_def.type_cast().field_instance(choices=None)
+            field = self.field_def.type_cast().construct(choices=None)
             field.clean(self.value, None)
         except ValidationError as e:
             raise ValidationError({'value': e.messages})
@@ -342,3 +340,7 @@ class FieldDefinitionChoice(OrderableModel):
         save = super(FieldDefinitionChoice, self).save(*args, **kwargs)
         self.field_def.model_def.model_class(force_create=True)
         return save
+
+    def get_ordering_queryset(self):
+        qs = super(FieldDefinitionChoice, self).get_ordering_queryset()
+        return qs.filter(field_def_id=self.field_def_id)

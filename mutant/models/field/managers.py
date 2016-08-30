@@ -1,5 +1,8 @@
 from __future__ import unicode_literals
 
+import warnings
+
+import django
 from django.db import models
 from polymodels.managers import PolymorphicManager, PolymorphicQuerySet
 
@@ -16,8 +19,19 @@ class FieldDefinitionQuerySet(PolymorphicQuerySet):
 
 
 class FieldDefinitionManager(PolymorphicManager):
-    def get_query_set(self):
+    def get_queryset(self):
         return FieldDefinitionQuerySet(self.model, using=self._db)
+
+    if django.VERSION < (1, 8):
+        def get_query_set(self):
+            warnings.warn(
+                "`FieldDefinitionManager.get_query_set` is deprecated, "
+                "use `get_queryset` instead.",
+                DeprecationWarning if django.VERSION >= (1, 7)
+                else PendingDeprecationWarning,
+                stacklevel=2
+            )
+            return FieldDefinitionManager.get_queryset(self)
 
     def get_by_natural_key(self, app_label, model, name):
         qs = self.select_subclasses()
@@ -25,30 +39,41 @@ class FieldDefinitionManager(PolymorphicManager):
                       model_def__model=model, name=name)
 
     def names(self):
-        qs = self.get_query_set()
+        qs = self.get_queryset()
         return qs.order_by('name').values_list('name', flat=True)
 
     def create_with_default(self, default, **kwargs):
-        qs = self.get_query_set()
+        qs = self.get_queryset()
         return qs.create_with_default(default, **kwargs)
 
 
 class FieldDefinitionChoiceQuerySet(models.query.QuerySet):
-    def as_choices(self):
+    def construct(self):
         # Here we don't use .values() since it's raw output from the database
         # and values are not prepared correctly.
-        choices = ({'group': choice.group,
-                    'label': choice.label,
-                    'value': choice.value}
-                   for choice in self.only('group', 'value', 'label'))
-        return choices_from_dict(choices)
+        choices = (
+            {'group': choice.group, 'label': choice.label, 'value': choice.value}
+            for choice in self.only('group', 'value', 'label')
+        )
+        return tuple(choices_from_dict(choices))
 
 
 class FieldDefinitionChoiceManager(models.Manager):
     use_for_related_fields = True
 
-    def as_choices(self):
-        return self.get_query_set().as_choices()
-
-    def get_query_set(self):
+    def get_queryset(self):
         return FieldDefinitionChoiceQuerySet(self.model, using=self._db)
+
+    if django.VERSION < (1, 8):
+        def get_query_set(self):
+            warnings.warn(
+                "`FieldDefinitionChoiceManager.get_query_set` is"
+                "deprecated, use `get_queryset` instead.",
+                DeprecationWarning if django.VERSION >= (1, 7)
+                else PendingDeprecationWarning,
+                stacklevel=2
+            )
+            return FieldDefinitionChoiceManager.get_queryset(self)
+
+    def construct(self):
+        return self.get_queryset().construct()

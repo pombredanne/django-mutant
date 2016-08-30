@@ -1,52 +1,47 @@
 from __future__ import unicode_literals
 
-from django.db.models.signals import post_delete, post_save, pre_delete
+from django.db.models import Q
+from django.db.models.fields.related import RelatedField
+from django.utils.six import string_types
 
-from ....management import allow_syncdbs, perform_ddl
+from ....compat import get_remote_field_model
+from ....db.models import MutableModel
+from ....models import ModelDefinition
+from ....utils import clear_opts_related_cache
 
-from ..models import ManyToManyFieldDefinition
 
-
-def many_to_many_field_definition_post_save(sender, instance, created, **kwargs):
+def mutable_model_prepared(signal, sender, definition, existing_model_class,
+                           **kwargs):
     """
-    This is not connected atm since there's an issue while used as a signal
+    Make sure all related model class are created and marked as dependency
+    when a mutable model class is prepared
     """
-    if created:
-        model_class = instance.model_def.model_class(force_create=True)
-        field = model_class._meta.get_field(str(instance.name))
-        options = field.rel.through._meta
-        intermediary_table_name = options.db_table
-        intermediary_table_fields = tuple((field.name, field)
-                                          for field in options.fields)
-        perform_ddl(model_class, 'create_table',
-                    intermediary_table_name, intermediary_table_fields)
-    else:
-        #TODO: track field and model rename in order to rename the intermediaray
-        # table...
-        pass
-
-#post_save.connect(many_to_many_field_definition_post_save, ManyToManyFieldDefinition,
-#                  dispatch_uid='mutant.contrib.related.management.many_to_many_field_definition_post_save')
-
-
-def many_to_many_field_definition_pre_delete(sender, instance, **kwargs):
-    model_class = instance.model_def.model_class()
-    field = model_class._meta.get_field(str(instance.name))
-    intermediary_table_name = field.rel.through._meta.db_table
-    instance._state._m2m_deletion = (
-        allow_syncdbs(model_class),
-        intermediary_table_name
-    )
-
-pre_delete.connect(many_to_many_field_definition_pre_delete, ManyToManyFieldDefinition,
-                   dispatch_uid='mutant.contrib.related.management.many_to_many_field_definition_pre_delete')
-
-
-def many_to_many_field_definition_post_delete(sender, instance, **kwargs):
-    syncdbs, intermediary_table_name = instance._state._m2m_deletion
-    for db in syncdbs:
-        db.delete_table(intermediary_table_name)
-    del instance._state._m2m_deletion
-
-post_delete.connect(many_to_many_field_definition_post_delete, ManyToManyFieldDefinition,
-                    dispatch_uid='mutant.contrib.related.management.many_to_many_field_definition_post_delete')
+    referenced_models = set()
+    # Collect all model class the obsolete model class was referring to
+    if existing_model_class:
+        for field in existing_model_class._meta.local_fields:
+            if isinstance(field, RelatedField):
+                remote_field_model = get_remote_field_model(field)
+                if not isinstance(remote_field_model, string_types):
+                    referenced_models.add(remote_field_model)
+    # Add sender as a dependency of all mutable models it refers to
+    for field in sender._meta.local_fields:
+        if isinstance(field, RelatedField):
+            remote_field_model = get_remote_field_model(field)
+            if not isinstance(remote_field_model, string_types):
+                referenced_models.add(remote_field_model)
+                if (issubclass(remote_field_model, MutableModel) and
+                        remote_field_model._definition != sender._definition):
+                    remote_field_model._dependencies.add(sender._definition)
+    # Mark all model referring to this one as dependencies
+    related_model_defs = ModelDefinition.objects.filter(
+        Q(fielddefinitions__foreignkeydefinition__to=definition) |
+        Q(fielddefinitions__manytomanyfielddefinition__to=definition)
+    ).distinct()
+    for model_def in related_model_defs:
+        if model_def != definition:
+            # Generate model class from definition and add it as a dependency
+            sender._dependencies.add(model_def.model_class()._definition)
+    # Clear the referenced models opts related cache
+    for model_class in referenced_models:
+        clear_opts_related_cache(model_class)

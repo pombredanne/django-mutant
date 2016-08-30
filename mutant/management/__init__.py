@@ -3,64 +3,65 @@ from __future__ import unicode_literals
 from functools import wraps
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import connections, models, router
+from django.db import connections, models, transaction
 from django.db.models.fields import FieldDoesNotExist
-from django.db.models.signals import (m2m_changed, post_delete, post_save,
-    pre_delete)
-from django.dispatch.dispatcher import receiver
-from south.db import dbs
 
-from mutant import logger
-from mutant.models import (ModelDefinition, BaseDefinition, FieldDefinition,
-    UniqueTogetherDefinition)
+from ..compat import get_remote_field
+from ..state import handler as state_handler
+from ..utils import allow_migrate, popattr, remove_from_app_cache
 
 
-def allow_syncdbs(model):
-    for db in connections:
-        if router.allow_syncdb(db, model):
-            yield dbs[db]
+def perform_ddl(action, model, *args, **kwargs):
+    if model._meta.managed:
+        return
+
+    for alias in allow_migrate(model):
+        connection = connections[alias]
+        with transaction.atomic(alias), connection.schema_editor() as editor:
+            getattr(editor, action)(model, *args, **kwargs)
 
 
-def perform_ddl(model, action, *args, **kwargs):
-    for db in allow_syncdbs(model):
-        if db.deferred_sql:
-            for statement in db.deferred_sql:
-                logger.warn("Clearing non-executed deferred SQL statement "
-                            "since we can't assume it's safe to execute it now. "
-                            "Statements was: %s", statement)
-            db.clear_deferred_sql()
-        getattr(db, action)(*args, **kwargs)
-        db.execute_deferred_sql()
-
-
-def post_save_nonraw_instance(receiver):
+def nonraw_instance(receiver):
     """
     A signal receiver decorator that fetch the complete instance from db when
     it's passed as raw
     """
     @wraps(receiver)
-    def wrapper(sender, raw, instance, using, **kwargs):
+    def wrapper(sender, instance, raw, using, **kwargs):
         if raw:
             instance = sender._default_manager.using(using).get(pk=instance.pk)
         return receiver(sender=sender, raw=raw, instance=instance, using=using,
                         **kwargs)
     return wrapper
 
-@receiver(post_save, sender=ModelDefinition,
-          dispatch_uid='mutant.management.model_definition_post_save')
-@post_save_nonraw_instance
-def model_definition_post_save(sender, instance, created, raw, **kwargs):
+
+@nonraw_instance
+def model_definition_post_save(sender, instance, created, **kwargs):
     model_class = instance.model_class(force_create=True)
     opts = model_class._meta
+    db_table = opts.db_table
     if created:
-        fields = [(field.get_attname_column()[1], field) for field in opts.fields]
+        primary_key = opts.pk
+        fields = [(field.get_attname_column()[1], field) for field in opts.fields
+                  if field is not primary_key]
         try:
             extra_fields = getattr(instance._state, '_create_extra_fields')
         except AttributeError:
             pass
         else:
-            fields.extend(extra_fields)
+            for column, field in extra_fields:
+                remote_field = get_remote_field(field)
+                if field.primary_key:
+                    assert isinstance(primary_key, models.AutoField)
+                    primary_key = field
+                elif (remote_field and remote_field.parent_link and
+                      isinstance(primary_key, models.AutoField)):
+                    field.primary_key = True
+                    primary_key = field
+                else:
+                    fields.append((column, field))
             delattr(instance._state, '_create_extra_fields')
+        fields.insert(0, (primary_key.get_attname_column()[1], primary_key))
         try:
             delayed_save = getattr(instance._state, '_create_delayed_save')
         except AttributeError:
@@ -68,163 +69,168 @@ def model_definition_post_save(sender, instance, created, raw, **kwargs):
         else:
             for obj in delayed_save:
                 obj.model_def = instance
-                obj.save(force_insert=True)
+                obj.save(force_insert=True, force_create_model_class=False)
             delattr(instance._state, '_create_delayed_save')
-        perform_ddl(model_class, 'create_table', opts.db_table, fields)
+        model_class = instance.model_class(force_create=True)
+        perform_ddl('create_model', model_class)
     else:
-        old_opts = instance._model_class._meta
-        if old_opts.db_table != opts.db_table:
-            perform_ddl(model_class, 'rename_table', old_opts.db_table, opts.db_table)
-            # It means that the natural key has changed
+        old_model_class = instance._model_class
+        if old_model_class:
+            old_db_table = old_model_class._meta.db_table
+            if db_table != old_db_table:
+                perform_ddl('alter_db_table', model_class, old_db_table, db_table)
             ContentType.objects.clear_cache()
+    instance._model_class = model_class.model
 
 
-@receiver(post_delete, sender=ModelDefinition,
-          dispatch_uid='mutant.management.model_definition_post_delete')
-def model_definition_post_delete(sender, instance, **kwargs):
+def model_definition_pre_delete(sender, instance, **kwargs):
     model_class = instance.model_class()
-    table_name = model_class._meta.db_table
-    perform_ddl(model_class, 'delete_table', table_name)
+    instance._state._deletion = (
+        model_class,
+        instance.pk,
+    )
 
 
-@receiver(post_save, sender=BaseDefinition,
-          dispatch_uid='mutant.management.base_definition_post_save')
+def model_definition_post_delete(sender, instance, **kwargs):
+    model_class, pk = popattr(instance._state, '_deletion')
+    perform_ddl('delete_model', model_class)
+    remove_from_app_cache(model_class)
+    model_class.mark_as_obsolete()
+    state_handler.clear_checksum(pk)
+    ContentType.objects.clear_cache()
+    del instance._model_class
+
+
 def base_definition_post_save(sender, instance, created, raw, **kwargs):
     declared_fields = instance.get_declared_fields()
     if declared_fields:
-        model_class = instance.model_def.model_class()
+        model_class = instance.model_def.model_class().render_state()
         opts = model_class._meta
-        table_name = opts.db_table
         if created:
-            try:
-                add_columns = getattr(instance._state, '_add_columns')
-            except AttributeError:
-                add_columns = True
-            else:
-                delattr(instance._state, '_add_columns')
-            finally:
-                if add_columns:
-                    for field in declared_fields:
-                        perform_ddl(model_class, 'add_column', table_name,
-                                    field.name, field, keep_default=False)
+            add_columns = popattr(instance._state, '_add_columns', True)
+            if add_columns:
+                auto_pk = isinstance(opts.pk, models.AutoField)
+                for field in declared_fields:
+                    field.model = model_class
+                    remote_field = get_remote_field(field)
+                    if auto_pk and remote_field and remote_field.parent_link:
+                        auto_pk = False
+                        field.primary_key = True
+                        perform_ddl('alter_field', model_class, opts.pk, field, strict=True)
+                    else:
+                        perform_ddl('add_field', model_class, field)
         else:
             for field in declared_fields:
                 try:
                     old_field = opts.get_field(field.name)
                 except FieldDoesNotExist:
-                    perform_ddl(model_class, 'add_column', table_name,
-                                field.name, field, keep_default=False)
+                    perform_ddl('add_field', model_class, field)
                 else:
-                    column = old_field.get_attname_column()[1]
-                    perform_ddl(model_class, 'alter_column', table_name,
-                                column, field)
+                    perform_ddl('alter_field', model_class, old_field, field, strict=True)
 
 
-@receiver(pre_delete, sender=BaseDefinition,
-          dispatch_uid='mutant.management.base_definition_pre_delete')
 def base_definition_pre_delete(sender, instance, **kwargs):
     """
     This is used to pass data required for deletion to the post_delete
     signal that is no more available thereafter.
     """
-    if issubclass(instance.base, models.Model):
-        model_class = instance.model_def.model_class()
-        instance._state._deletion = (
-            allow_syncdbs(model_class),
-            model_class._meta.db_table,
-        )
+    # see CASCADE_MARK_ORIGIN's docstring
+    cascade_deletion_origin = popattr(
+        instance._state, '_cascade_deletion_origin', None
+    )
+    if cascade_deletion_origin == 'model_def':
+        return
+    if (instance.base and issubclass(instance.base, models.Model) and
+            instance.base._meta.abstract):
+        instance._state._deletion = instance.model_def.model_class().render_state()
 
 
-@receiver(post_delete, sender=BaseDefinition,
-          dispatch_uid='mutant.management.base_definition_post_delete')
 def base_definition_post_delete(sender, instance, **kwargs):
-    if issubclass(instance.base, models.Model):
-        syncdbs, table_name = instance._state._deletion
+    """
+    Make sure to delete fields inherited from an abstract model base.
+    """
+    if hasattr(instance._state, '_deletion'):
+        # Make sure to flatten abstract bases since Django
+        # migrations can't deal with them.
+        model = popattr(instance._state, '_deletion')
         for field in instance.base._meta.fields:
-            for db in syncdbs:
-                db.delete_column(table_name, field.name)
-        del instance._state._deletion
+            perform_ddl('remove_field', model, field)
 
 
-@receiver(m2m_changed, sender=UniqueTogetherDefinition.field_defs.through,
-          dispatch_uid='mutant.management.unique_together_field_defs_changed')
 def unique_together_field_defs_changed(instance, action, model, **kwargs):
-    columns = list(instance.field_defs.names())
-    # If there's no columns and action is post_clear there's nothing to do
-    if columns and action != 'post_clear':
-        model_class = instance.model_def.model_class()
-        table_name = model_class._meta.db_table
-        if action in ('pre_add', 'pre_remove', 'pre_clear'):
-            perform_ddl(model_class, 'delete_unique', table_name, columns)
-        # Safe guard against m2m_changed.action API change
-        elif action in ('post_add', 'post_remove'):
-            perform_ddl(model_class, 'create_unique', table_name, columns)
+    model_class = instance.model_def.model_class()
+    if action.startswith('post_'):
+        perform_ddl(
+            'alter_unique_together',
+            model_class,
+            model_class._meta.unique_together,
+            instance.model_def.get_state().options.get('unique_together', [])
+        )
+        model_class.mark_as_obsolete()
 
 
-@post_save_nonraw_instance
+def raw_field_definition_proxy_post_save(sender, instance, raw, **kwargs):
+    """
+    When proxy field definitions are loaded from a fixture they're not
+    passing through the `field_definition_post_save` signal. Make sure they
+    are.
+    """
+    if raw:
+        model_class = instance.content_type.model_class()
+        opts = model_class._meta
+        if opts.proxy and opts.concrete_model is sender:
+            field_definition_post_save(
+                sender=model_class, instance=instance.type_cast(), raw=raw,
+                **kwargs
+            )
+
+
+@nonraw_instance
 def field_definition_post_save(sender, instance, created, raw, **kwargs):
     """
     This signal is connected by all FieldDefinition subclasses
     see comment in FieldDefinitionBase for more details
     """
-    # If the field definition is raw we must re-create the model definition
-    # since ModelDefinitionAttribute.save won't be called
-    model_class = instance.model_def.model_class(force_create=raw)
-    table_name = model_class._meta.db_table
-    field = instance._south_ready_field_instance()
+    model_class = instance.model_def.model_class().render_state()
+    field = instance.construct_for_migrate()
+    field.model = model_class
     if created:
         if hasattr(instance._state, '_creation_default_value'):
             field.default = instance._state._creation_default_value
             delattr(instance._state, '_creation_default_value')
-            keep_default = False
-        else:
-            keep_default = True
-        try:
-            add_column = getattr(instance._state, '_add_column')
-        except AttributeError:
-            add_column = True
-        else:
-            delattr(instance._state, '_add_column')
-        finally:
-            if add_column:
-                perform_ddl(model_class, 'add_column', table_name,
-                            instance.name, field, keep_default=keep_default)
+        add_column = popattr(instance._state, '_add_column', True)
+        if add_column:
+            perform_ddl('add_field', model_class, field)
+            # If the field definition is raw we must re-create the model class
+            # since ModelDefinitionAttribute.save won't be called
+            if raw:
+                instance.model_def.model_class().mark_as_obsolete()
     else:
-        column = field.get_attname_column()[1]
         old_field = instance._state._pre_save_field
         delattr(instance._state, '_pre_save_field')
-        # Field renaming
-        old_column = old_field.get_attname_column()[1]
-        if column != old_column:
-            perform_ddl(model_class, 'rename_column', table_name, old_column, column)
-        # Create/Drop unique and primary key
-        for opt in ('primary_key', 'unique'):
-            value = getattr(field, opt)
-            if value != getattr(old_field, opt):
-                action_prefix = 'create' if value else 'delete'
-                action = "%s_%s" % (action_prefix, opt)
-                perform_ddl(model_class, action, table_name, (column,))
-        perform_ddl(model_class, 'alter_column', table_name, column, field)
+        perform_ddl('alter_field', model_class, old_field, field, strict=True)
 
 FIELD_DEFINITION_POST_SAVE_UID = "mutant.management.%s_post_save"
 
 
-@receiver(pre_delete, sender=FieldDefinition,
-          dispatch_uid='mutant.management.field_definition_pre_delete')
 def field_definition_pre_delete(sender, instance, **kwargs):
+    # see CASCADE_MARK_ORIGIN's docstring
+    cascade_deletion_origin = popattr(
+        instance._state, '_cascade_deletion_origin', None
+    )
+    if cascade_deletion_origin == 'model_def':
+        return
     model_class = instance.model_def.model_class()
     opts = model_class._meta
-    instance._state._deletion = (
-        allow_syncdbs(model_class),
-        opts.db_table,
-        opts.get_field(instance.name).column
-    )
+    field = opts.get_field(instance.name)
+    instance._state._deletion = (model_class, field)
 
 
-@receiver(post_delete, sender=FieldDefinition,
-          dispatch_uid='mutant.management.field_definition_post_delete')
 def field_definition_post_delete(sender, instance, **kwargs):
-    syncdbs, table_name, name = instance._state._deletion
-    for db in syncdbs:
-        db.delete_column(table_name, name)
-    del instance._state._deletion
+    if hasattr(instance._state, '_deletion'):
+        model, field = popattr(instance._state, '_deletion')
+        if field.primary_key:
+            primary_key = models.AutoField(name='id', primary_key=True)
+            perform_ddl('alter_field', model, field, primary_key, strict=True)
+        else:
+            perform_ddl('remove_field', model, field)

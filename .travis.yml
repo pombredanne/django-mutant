@@ -1,48 +1,88 @@
-branches:
-  only:
-    - master
+sudo: no
 
 language: python
 
-python:
-  - 2.6
-  - 2.7
+addons:
+  postgresql: "9.3"
+
+services:
+  - redis-server
 
 env:
-  - REQUIREMENTS=1.3.X           ENGINE=sqlite3
-  - REQUIREMENTS=1.3.X-postgres  ENGINE=postgresql TEMPLATE=template0
-  - REQUIREMENTS=1.3.X-postgres  ENGINE=postgis    TEMPLATE=template_postgis
-  - REQUIREMENTS=mongo           ENGINE=mongodb
-  - REQUIREMENTS=1.4.X           ENGINE=sqlite3
-  - REQUIREMENTS=1.4.X-postgres  ENGINE=postgresql TEMPLATE=template0
-  - REQUIREMENTS=1.4.X-postgres  ENGINE=postgis    TEMPLATE=template_postgis
-  - REQUIREMENTS=master          ENGINE=sqlite3
-  - REQUIREMENTS=master-postgres ENGINE=postgresql TEMPLATE=template0
-  - REQUIREMENTS=master-postgres ENGINE=postgis    TEMPLATE=template_postgis
+  - TOXENV=flake8
+  - TOXENV=isort
+  - TOXENV=py27-1.8-sqlite
+  - TOXENV=py27-1.8-postgresql
+  - TOXENV=py27-1.8-postgis
+  - TOXENV=py27-1.9-sqlite
+  - TOXENV=py27-1.9-postgresql
+  - TOXENV=py27-1.9-postgis
+  - TOXENV=py27-1.10-sqlite
+  - TOXENV=py27-1.10-postgresql
+  - TOXENV=py27-1.10-postgis
+  - TOXENV=py27-master-sqlite
+  - TOXENV=py27-master-postgresql
+  - TOXENV=py27-master-postgis
+  - TOXENV=py32-1.8-sqlite
+  - TOXENV=py32-1.8-postgresql
+  - TOXENV=py32-1.8-postgis
+  - TOXENV=py33-1.8-sqlite
+  - TOXENV=py33-1.8-postgresql
+  - TOXENV=py33-1.8-postgis
+  - TOXENV=py34-1.8-sqlite
+  - TOXENV=py34-1.8-postgresql
+  - TOXENV=py34-1.8-postgis
+  - TOXENV=py34-1.9-sqlite
+  - TOXENV=py34-1.9-postgresql
+  - TOXENV=py34-1.9-postgis
+  - TOXENV=py34-1.10-sqlite
+  - TOXENV=py34-1.10-postgresql
+  - TOXENV=py34-1.10-postgis
+  - TOXENV=py34-master-sqlite
+  - TOXENV=py34-master-postgresql
+  - TOXENV=py34-master-postgis
 
 matrix:
+  fast_finish: true
+  include:
+    - python: 3.5
+      env: TOXENV=py35-1.9-sqlite
+    - python: 3.5
+      env: TOXENV=py35-1.9-postgresql
+    - python: 3.5
+      env: TOXENV=py35-1.9-postgis
+    - python: 3.5
+      env: TOXENV=py35-1.10-sqlite
+    - python: 3.5
+      env: TOXENV=py35-1.10-postgresql
+    - python: 3.5
+      env: TOXENV=py35-1.10-postgis
+    - python: 3.5
+      env: TOXENV=py35-master-sqlite
+    - python: 3.5
+      env: TOXENV=py35-master-postgresql
+    - python: 3.5
+      env: TOXENV=py35-master-postgis
   allow_failures:
-    - env: REQUIREMENTS=mongo           ENGINE=mongodb
-    - env: REQUIREMENTS=master          ENGINE=sqlite3
-    - env: REQUIREMENTS=master-postgres ENGINE=postgresql TEMPLATE=template0
-    - env: REQUIREMENTS=master-postgres ENGINE=postgis    TEMPLATE=template_postgis
-
-postgres:
-  adapter: postgresql
-  database: mutant
-  username: postgres
+    - env: TOXENV=py27-master-sqlite
+    - env: TOXENV=py27-master-postgresql
+    - env: TOXENV=py27-master-postgis
+    - env: TOXENV=py34-master-sqlite
+    - env: TOXENV=py34-master-postgresql
+    - env: TOXENV=py34-master-postgis
+    - env: TOXENV=py35-master-sqlite
+    - env: TOXENV=py35-master-postgresql
+    - env: TOXENV=py35-master-postgis
 
 install:
-  - pip install argparse --use-mirrors
-  - pip install -r requirements/$REQUIREMENTS.txt --use-mirrors
-  - python setup.py install
+  - pip install tox coveralls "virtualenv<14.0"
 
 before_script:
-  - if [ -d '/usr/share/postgresql/8.4/' ]; then PG='8.4'; else PG='9.1'; fi
-  - if echo $ENGINE | grep 'postgis'; then sudo apt-get install binutils gdal-bin libproj-dev postgresql-${PG}-postgis; fi
-  - if echo $ENGINE | grep 'postgis'; then sudo su postgres -c './create_template_postgis-debian.sh'; fi
-  - if echo $ENGINE | grep -E '(postgresql|postgis)'; then psql -c "CREATE DATABASE mutant TEMPLATE ${TEMPLATE};" -U postgres; fi
+  - if echo $TOXENV | grep -E '(-postgresql|-postgis)' -q; then psql -U postgres -c "CREATE DATABASE mutant;"; fi
+  - if echo $TOXENV | grep '\-postgis' -q; then psql mutant -U postgres -c "CREATE EXTENSION postgis; CREATE EXTENSION postgis_topology;"; fi
 
 script:
-  - python runtests.py --engine=$ENGINE
+  - tox
 
+after_success:
+  - coveralls

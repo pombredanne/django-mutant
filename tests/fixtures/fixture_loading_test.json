@@ -1,0 +1,83 @@
+[
+    {
+        "pk": 9999,
+        "model": "contenttypes.contenttype",
+        "fields": {
+            "model": "myfixturemodel",
+            "app_label": "tests"
+        }
+    },
+    {
+        "pk": 9999,
+        "model": "mutant.modeldefinition",
+        "fields": {
+            "object_name": "MyFixtureModel",
+            "verbose_name": null,
+            "verbose_name_plural": null,
+            "db_table": "fixture_model_table"
+        }
+    },
+    {
+        "pk": 9999,
+        "model": "mutant.fielddefinition",
+        "fields": {
+            "primary_key": false,
+            "unique_for_month": null,
+            "unique": false,
+            "name": "fixture_charfield",
+            "model_def": [
+                "tests",
+                "myfixturemodel"
+            ],
+            "default": "",
+            "editable": true,
+            "unique_for_year": null,
+            "content_type": [
+                "text",
+                "charfielddefinition"
+            ],
+            "blank": true,
+            "help_text": null,
+            "db_column": "fixture_charfieldcolumn",
+            "null": true,
+            "verbose_name": "",
+            "unique_for_date": null,
+            "db_index": false
+        }
+    },
+    {
+        "pk": 9998,
+        "model": "mutant.fielddefinition",
+        "fields": {
+            "primary_key": false,
+            "unique_for_month": null,
+            "unique": false,
+            "name": "fixture_integerfield",
+            "model_def": [
+                "tests",
+                "myfixturemodel"
+            ],
+            "default": "gAJjZGphbmdvLmRiLm1vZGVscy5maWVsZHMKTk9UX1BST1ZJREVECnEBLg==",
+            "editable": true,
+            "unique_for_year": null,
+            "content_type": [
+                "numeric",
+                "integerfielddefinition"
+            ],
+            "blank": true,
+            "help_text": null,
+            "db_column": "fixture_integerfieldcolumn",
+            "null": true,
+            "verbose_name": "",
+            "unique_for_date": null,
+            "db_index": false
+        }
+    },
+    {
+        "pk": 9999,
+        "model": "text.charfielddefinition",
+        "fields": {
+            "max_length": 255
+        }
+    }
+]

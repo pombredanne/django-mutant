@@ -2,10 +2,12 @@ from __future__ import unicode_literals
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models import fields
-from django.db.models.signals import class_prepared
-
-from ...models import ModelDefinition
 from django.db.models.fields import FieldDoesNotExist
+from django.db.models.signals import class_prepared
+from django.utils import six
+
+from ...compat import get_remote_field_model
+from ...models import ModelDefinition
 
 
 class ModelClassAttributeDescriptor(object):
@@ -27,7 +29,9 @@ class ModelClassAttributeDescriptor(object):
                                                  self.name, self.model_def_name))
         else:
             if (not isinstance(field, fields.related.ForeignKey) or
-                not issubclass(field.rel.to, ModelDefinition)):
+                    (isinstance(get_remote_field_model(field), six.string_types) and
+                        get_remote_field_model(field).lower() != 'mutant.modeldefinition') or
+                    not issubclass(get_remote_field_model(field), ModelDefinition)):
                 raise ImproperlyConfigured("%s.%s.%s must refer to a ForeignKey "
                                            "to `ModelDefinition`"
                                            % (opts.app_label, opts.object_name,

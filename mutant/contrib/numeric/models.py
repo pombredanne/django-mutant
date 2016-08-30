@@ -12,42 +12,42 @@ class _NumericMeta:
 
 class SmallIntegerFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.SmallIntegerField
 
 
 class PositiveSmallIntegerFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.PositiveSmallIntegerField
 
 
 class IntegerFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.IntegerField
 
 
 class PositiveIntegerFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.PositiveIntegerField
 
 
 class BigIntegerFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.BigIntegerField
 
 
 class FloatFieldDefinition(FieldDefinition):
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         proxy = True
         defined_field_class = fields.FloatField
 
@@ -58,6 +58,7 @@ max_digits_help_text = _('The maximum number of digits allowed in the number. '
 decimal_places_help_text = _('The number of decimal places to store '
                              'with the number.')
 
+
 class DecimalFieldDefinition(FieldDefinition):
     max_digits = fields.PositiveSmallIntegerField(_('max digits'),
                                                   help_text=max_digits_help_text)
@@ -67,6 +68,6 @@ class DecimalFieldDefinition(FieldDefinition):
     objects = FieldDefinitionManager()
 
     class Meta(_NumericMeta):
-        app_label = 'mutant'
+        app_label = 'numeric'
         defined_field_class = fields.DecimalField
         defined_field_options = ('max_digits', 'decimal_places',)

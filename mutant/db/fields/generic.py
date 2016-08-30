@@ -1,46 +1,25 @@
 from __future__ import unicode_literals
 
-from django.contrib.contenttypes.generic import GenericForeignKey
-from django.contrib.contenttypes.models import ContentType
-from django.core import exceptions
-from django.db.models import fields
-from django.utils.translation import ugettext_lazy as _
-from polymodels.utils import get_content_type
+from django.db import models
+from polymodels.fields import PolymorphicTypeField
+
+from ... import forms
 
 
-class FieldDefinitionTypeField(fields.related.ForeignKey):
-    def __init__(self, *args, **kwargs):
-        defaults={'to': ContentType}
+class FieldDefinitionTypeField(PolymorphicTypeField):
+    def __init__(self, on_delete=models.CASCADE, *args, **kwargs):
+        super(FieldDefinitionTypeField, self).__init__(
+            'mutant.FieldDefinition', on_delete=on_delete, *args, **kwargs
+        )
+
+    def deconstruct(self):
+        name, path, args, kwargs = super(FieldDefinitionTypeField, self).deconstruct()
+        kwargs.pop('polymorphic_type')
+        if kwargs.get('on_delete') == models.CASCADE:
+            kwargs.pop('on_delete')
+        return name, path, args, kwargs
+
+    def formfield(self, **kwargs):
+        defaults = {'form_class': forms.FieldDefinitionTypeField}
         defaults.update(kwargs)
-        super(FieldDefinitionTypeField, self).__init__(*args, **defaults)
-
-    def validate(self, value, model_instance):
-        super(FieldDefinitionTypeField, self).validate(value, model_instance)
-        if value is None:
-            return
-        if isinstance(value, int):
-            try:
-                value = ContentType.objects.get(id=value)
-            except ContentType.DoesNotExist:
-                msg = self.error_messages['invalid'] % {
-                'model': self.rel.to._meta.verbose_name, 'pk': value}
-                raise exceptions.ValidationError(msg)
-        # Lazily import to avoid circular reference
-        from mutant.models import FieldDefinition
-        cls = value.model_class()
-        if not issubclass(cls, FieldDefinition) or cls is FieldDefinition:
-            msg = _('This field must be the ContentType of '
-                    'an explicit FieldDefinition subclass.')
-            raise exceptions.ValidationError(msg)
-
-
-class ProxyAwareGenericForeignKey(GenericForeignKey):
-    """
-    Basically a GenericForeignKey that saves the actual ContentType of the object
-    even if it's a proxy Model.
-    """
-    def get_content_type(self, obj=None, **kwargs):
-        if obj:
-            return get_content_type(obj.__class__, obj._state.db)
-        else:
-            return super(ProxyAwareGenericForeignKey, self).get_content_type(obj, **kwargs)
+        return super(FieldDefinitionTypeField, self).formfield(**kwargs)

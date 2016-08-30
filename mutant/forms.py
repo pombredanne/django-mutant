@@ -1,51 +1,95 @@
 from __future__ import unicode_literals
 
-from inspect import isclass
-
+from django import forms
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
-from django.core.validators import EMPTY_VALUES
-from django.forms.fields import ChoiceField
-from django.utils.encoding import smart_unicode
-from polymodels.utils import get_content_types
+from django.utils.encoding import smart_text
+from django.utils.functional import LazyObject
 
-from .models.field import FieldDefinition, FieldDefinitionBase
-from .utils import group_item_getter, choices_from_dict
+from .utils import choices_from_dict
 
 
-class FieldDefinitionTypeField(ChoiceField):
-    def __init__(self, field_definitions=None, empty_label="---------",
-                 group_by_category=True, *args, **kwargs):
-        if field_definitions is None:
-            field_definitions = FieldDefinitionBase._field_definitions.values()
-        else:
-            for fd in field_definitions:
-                if not isinstance(fd, FieldDefinitionBase):
-                    raise TypeError("%r is not a subclass of FieldDefinitionBase" % fd)
-        fds_choices = []
-        for fd, ct in get_content_types(field_definitions).iteritems():
-            group = unicode(fd.get_field_category()) if group_by_category else None
-            fds_choices.append({
-                'value': ct.pk,
-                'label': unicode(fd.get_field_description()),
-                'group': group,
+class LazyFieldDefinitionQueryset(LazyObject):
+    def __init__(self, queryset, models):
+        super(LazyFieldDefinitionQueryset, self).__init__()
+        self.__dict__.update(queryset=queryset, models=models)
+
+    def _setup(self):
+        queryset = self.__dict__.get('queryset')
+        models = self.__dict__.get('models')
+        self._wrapped = queryset.filter(
+            pk__in=[ct.pk for ct in ContentType.objects.get_for_models(
+                *models, for_concrete_models=False
+            ).values()]
+        )
+
+
+class LazyFieldDefinitionGroupedChoices(LazyObject):
+    def __init__(self, queryset, empty_label, label_from_instance):
+        super(LazyFieldDefinitionGroupedChoices, self).__init__()
+        self.__dict__.update(
+            queryset=queryset, empty_label=empty_label,
+            label_from_instance=label_from_instance
+        )
+
+    def _setup(self):
+        queryset = self.__dict__.get('queryset')
+        label_from_instance = self.__dict__.get('label_from_instance')
+        empty_label = self.__dict__.get('empty_label')
+        definition_choices = []
+        for content_type in queryset:
+            definition = content_type.model_class()
+            category = definition.get_field_category()
+            definition_choices.append({
+                'group': smart_text(category) if category else None,
+                'value': content_type.pk,
+                'label': label_from_instance(content_type),
             })
-        choices = [('', empty_label)] + list(choices_from_dict(sorted(fds_choices, key=group_item_getter)))
-        super(FieldDefinitionTypeField, self).__init__(choices, *args, **kwargs)
+        choices = list(
+            choices_from_dict(
+                sorted(definition_choices, key=lambda c: c['group'] or '')
+            )
+        )
+        if empty_label is not None:
+            choices.insert(0, ('', self.empty_label))
+        self._wrapped = choices
 
-    def to_python(self, value):
-        if value in EMPTY_VALUES:
-            return None
-        try:
-            ct = ContentType.objects.get_for_id(value)
-        except ContentType.DoesNotExist:
-            raise ValidationError(self.error_messages['invalid_choice'])
-        return ct
 
-    def valid_value(self, value):
-        if isclass(value) and issubclass(value, FieldDefinition):
-            value = value.get_content_type()
-        if isinstance(value, ContentType):
-            value = value.pk
-        value = smart_unicode(value)
-        return super(FieldDefinitionTypeField, self).valid_value(value)
+class FieldDefinitionTypeField(forms.ModelChoiceField):
+    def __init__(self, *args, **kwargs):
+        self.field_definitions = kwargs.pop('field_definitions', [])
+        self.group_by_category = kwargs.pop('group_by_category', False)
+        super(FieldDefinitionTypeField, self).__init__(*args, **kwargs)
+
+    def _get_field_definitions(self):
+        return self._field_definitions
+
+    def _set_field_definitions(self, definitions):
+        for definition in definitions:
+            from mutant.models import FieldDefinition
+            if not issubclass(definition, FieldDefinition):
+                raise TypeError(
+                    "%r is not a subclass of `FieldDefinition`" % definition
+                )
+        self._field_definitions = definitions
+
+    field_definitions = property(_get_field_definitions, _set_field_definitions)
+
+    def _get_queryset(self):
+        queryset = super(FieldDefinitionTypeField, self)._get_queryset()
+        if self.field_definitions:
+            return LazyFieldDefinitionQueryset(queryset, self.field_definitions)
+        return queryset
+
+    queryset = property(_get_queryset, forms.ModelChoiceField._set_queryset)
+
+    def _get_choices(self):
+        if self.group_by_category:
+            return LazyFieldDefinitionGroupedChoices(
+                self.queryset, self.empty_label, self.label_from_instance
+            )
+        return super(FieldDefinitionTypeField, self)._get_choices()
+
+    choices = property(_get_choices, forms.ModelChoiceField._set_queryset)
+
+    def label_from_instance(self, obj):
+        return smart_text(obj.model_class().get_field_description())
